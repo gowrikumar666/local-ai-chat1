@@ -1,9 +1,41 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, KeyboardEvent } from "react";
-import { Paperclip, Send, Square, X } from "lucide-react";
+import { Mic, MicOff, Paperclip, Send, Square, X } from "lucide-react";
 import { Button, IconButton } from "@mui/material";
+
+type SpeechRecognitionResult = {
+  isFinal: boolean;
+  [index: number]: { transcript: string } | undefined;
+};
+
+type SpeechRecognitionEvent = {
+  results: ArrayLike<SpeechRecognitionResult>;
+};
+
+type SpeechRecognitionErrorEvent = {
+  error: string;
+};
+
+type SpeechRecognitionInstance = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
+
+type SpeechWindow = Window & {
+  SpeechRecognition?: SpeechRecognitionConstructor;
+  webkitSpeechRecognition?: SpeechRecognitionConstructor;
+};
 
 type Props = {
   value: string;
@@ -28,7 +60,24 @@ export const ChatComposer = memo(function ChatComposer({
 }: Props) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [speechMessage, setSpeechMessage] = useState("");
   const canSend = Boolean(value.trim() || pendingFile);
+
+  useEffect(() => {
+    const speechWindow = window as SpeechWindow;
+    setSpeechSupported(
+      window.isSecureContext &&
+        Boolean(speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition),
+    );
+
+    return () => {
+      recognitionRef.current?.abort();
+      recognitionRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const node = inputRef.current;
@@ -36,16 +85,6 @@ export const ChatComposer = memo(function ChatComposer({
     node.style.height = "auto";
     node.style.height = `${Math.min(node.scrollHeight, 160)}px`;
   }, [value]);
-
-  const handleKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        onSend();
-      }
-    },
-    [onSend],
-  );
 
   const handleFileInput = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
@@ -55,6 +94,91 @@ export const ChatComposer = memo(function ChatComposer({
     },
     [onFileChange],
   );
+
+  const stopListening = useCallback(() => {
+    const recognition = recognitionRef.current;
+    if (!recognition) return;
+    recognitionRef.current = null;
+    setIsListening(false);
+    setSpeechMessage("");
+    recognition.stop();
+  }, []);
+
+  const handleSend = useCallback(() => {
+    if (isListening) stopListening();
+    onSend();
+  }, [isListening, onSend, stopListening]);
+
+  const handleKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        handleSend();
+      }
+    },
+    [handleSend],
+  );
+
+  const toggleListening = useCallback(() => {
+    if (isListening) {
+      stopListening();
+      return;
+    }
+
+    const speechWindow = window as SpeechWindow;
+    const Recognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+    if (!Recognition || !window.isSecureContext) {
+      setSpeechMessage("Voice input is unavailable in this browser or connection.");
+      return;
+    }
+
+    const recognition = new Recognition();
+    const initialValue = value;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = navigator.language || "en-US";
+    recognition.onresult = (event) => {
+      if (recognitionRef.current !== recognition) return;
+      let finalTranscript = "";
+      let interimTranscript = "";
+      for (let index = 0; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result?.[0]?.transcript ?? "";
+        if (result?.isFinal) finalTranscript += transcript;
+        else interimTranscript += transcript;
+      }
+      const spokenText = `${finalTranscript}${interimTranscript}`.trim();
+      const separator = initialValue && spokenText ? (initialValue.endsWith(" ") ? "" : " ") : "";
+      onChange(`${initialValue}${separator}${spokenText}`);
+    };
+    recognition.onerror = (event) => {
+      if (recognitionRef.current !== recognition) return;
+      recognitionRef.current = null;
+      setIsListening(false);
+      setSpeechMessage(
+        event.error === "not-allowed"
+          ? "Microphone access was blocked. Allow it in your browser settings to dictate."
+          : `Voice input stopped (${event.error}).`,
+      );
+    };
+    recognition.onend = () => {
+      if (recognitionRef.current !== recognition) return;
+      recognitionRef.current = null;
+      setIsListening(false);
+      setSpeechMessage("");
+    };
+
+    recognitionRef.current = recognition;
+    setSpeechMessage("Listening. Your browser may send audio to its speech service.");
+    setIsListening(true);
+    try {
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      setIsListening(false);
+      setSpeechMessage("Could not start voice input. Check microphone access and try again.");
+    }
+  }, [isListening, onChange, stopListening, value]);
 
   return (
     <div className="chat-composer">
@@ -100,15 +224,37 @@ export const ChatComposer = memo(function ChatComposer({
           <textarea
             ref={inputRef}
             value={value}
-            onChange={(event) => onChange(event.target.value)}
+            onChange={(event) => {
+              if (isListening) stopListening();
+              onChange(event.target.value);
+            }}
             onKeyDown={handleKeyDown}
             placeholder={pendingFile ? "Ask about this PDF..." : "Message Morrow..."}
             rows={1}
             disabled={disabled}
             className="chat-composer-input"
           />
+          <IconButton
+            aria-label={isListening ? "Stop voice input" : "Start voice input"}
+            title={
+              speechSupported
+                ? "Voice input (your browser may send audio to its speech service)"
+                : "Voice input requires a supported browser and a secure connection"
+            }
+            disabled={disabled || !speechSupported}
+            onClick={toggleListening}
+            sx={{
+              width: { xs: 36, sm: 40 },
+              height: { xs: 36, sm: 40 },
+              flexShrink: 0,
+              color: isListening ? "#ef6f61" : "#64748b",
+              bgcolor: isListening ? "rgba(239, 111, 97, 0.12)" : "transparent",
+            }}
+          >
+            {isListening ? <MicOff size={18} /> : <Mic size={18} />}
+          </IconButton>
           <Button
-            onClick={disabled ? onStop : onSend}
+            onClick={disabled ? onStop : handleSend}
             disabled={!disabled && !canSend}
             aria-label={disabled ? "Stop generating" : "Send message"}
             sx={{
@@ -128,6 +274,11 @@ export const ChatComposer = memo(function ChatComposer({
           </Button>
         </div>
       </div>
+      {speechMessage && (
+        <p className="chat-composer__hint" role="status" aria-live="polite">
+          {speechMessage}
+        </p>
+      )}
       <p className="chat-composer__hint">{`Upload a PDF to extract accurate data • Ollama ${modelName}`}</p>
     </div>
   );
