@@ -15,6 +15,11 @@ A private, fully local chat app built with Next.js and [Ollama](https://ollama.c
 ## Setup
 
 ```bash
+Before running the project, make sure the following are installed:
+Node.js 22 LTS or a compatible Node.js version
+npm
+Python 3.10+
+Visual Studio Build Tools with the Desktop development with C++ workload
 ollama pull llama3        # or any model you prefer
 npm install
 cp .env.example .env.local   # optional, see Configuration
